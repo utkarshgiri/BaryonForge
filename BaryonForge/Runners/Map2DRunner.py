@@ -848,21 +848,30 @@ class PaintProfilesAnisGrid(PaintProfilesGrid):
         keys = vars(self.model).get('p_keys', []) #Check if model has property keys
 
         #First we need to generate a model for the total mass distribution, according to the mass model
-        Mtot_map = PaintProfilesGrid(self.HaloNDCatalog, self.GriddedMap, self.epsilon_max, self.Mtot_model, 
-                                     self.use_ellipticity, self.mass_def, self.verbose).process()
+        Mtot_map = PaintProfilesGrid(HaloNDCatalog = self.HaloNDCatalog, GriddedMap = self.GriddedMap, 
+                                     epsilon_max = self.epsilon_max, model = self.Mtot_model, 
+                                     use_ellipticity = self.use_ellipticity, 
+                                     mass_def = self.mass_def, verbose = self.verbose).process()
         Mtot_map = Mtot_map.flatten() #Put it back in 1D array
         
         #Volume of the cell is different depending on whether we've projected down or not
         if self.GriddedMap.is2D:
-            dV = np.power(res, 2) * (2 * _get_parameter(self.Mtot_model, 'proj_cutoff')) #Fractor of 2 since proj_cutoff == Lproj/2
+            dL = (2 * _get_parameter(self.Mtot_model, 'proj_cutoff')) #Fractor of 2 since proj_cutoff == Lproj/2
+            dV = np.power(res, 2) * dL 
+            rho_halos = np.sum(Mtot_map) / (self.GriddedMap.L**2 * dL)
         else:
             dV = np.power(res, 3)
+            rho_halos = np.sum(Mtot_map) / self.GriddedMap.L**3
 
         #Now add the background contribution (we so far only have the halo contribution)
+        #Force the background to be positive, incase the pasted density is larger than the box size.
         rho_m     = cosmo.rho_x(1/(self.HaloNDCatalog.redshift + 1), species = 'matter', is_comoving = True)
-        Mtot_map += dV * rho_m
+        drho_m    = np.clip(rho_m - rho_halos, 0, None)
+        Mtot_map += dV * drho_m
 
-        Trtot_map = np.zeros_like(Mtot_map)
+        if self.verbose:
+            print(f"Inputted halos contribute {100*(rho_halos/rho_m):0.2f}% of the total matter density.")
+            print(f"Remaining density is assigned to a uniform background.")
 
         #We are ready to loop over halos now!
         for j in tqdm(range(self.HaloNDCatalog.cat.size), desc = 'Painting field', disable = not self.verbose):
@@ -952,31 +961,32 @@ class PaintProfilesAnisGrid(PaintProfilesGrid):
                     r_grid = np.sqrt(x_grid_ell**2/ar_j**2 + 
                                      y_grid_ell**2/br_j**2 +
                                      z_grid_ell**2/cr_j**2).reshape(x_grid_ell.shape)
-        
+
 
             Painting = Paint(cosmo,  r_grid.flatten(), M_j, a_j, **o_j)
             Canvas   = Tracer(cosmo, r_grid.flatten(), M_j, a_j, **o_j)
-            Mfrac    = Canvas / Mtot_map[inds] * orig_map_flattened[inds]
-            
-            Trtot_map[inds] += Canvas
-            
-            mask = np.isfinite(Painting) #Find which part of map cannot be modified due to out-of-bounds errors
+            Canvas   = np.where(np.isfinite(Canvas) & np.invert(np.isnan(Canvas)), Canvas, 0)
+            Mfrac    = np.divide(Canvas, Mtot_map[inds], out = np.zeros_like(Canvas), where = Mtot_map[inds] > 0) 
+            Mfrac   *= orig_map_flattened[inds]
+                        
+            mask = np.isfinite(Painting) & np.invert(np.isnan(Painting)) #Remove parts of map that have irregular values
             mask = mask & (r_grid.flatten() < R_j*self.epsilon_max)
             if mask.sum() == 0: continue
                 
-            Painting = np.where(mask, Painting, 0) #Set those tSZ values to 0
+            Painting = np.where(mask, Painting, 0) #Set bad regions of mask to 0
 
             #Add the offsets to the new map at the right indices, 
             #and using the mass fractions of the tracer particles
             new_map[inds] += Painting * Mfrac
+
+        #Missing mass was assigned to uniform background. Here we account for that background's contribution
+        Mfrac    = np.divide(dV * drho_m, Mtot_map, out = np.zeros_like(Mtot_map), where = Mtot_map > 0)
+        Mfrac   *= orig_map_flattened
+        new_map += self.background_val * self.global_tracer_fraction * Mfrac
         
-
-        #Check how much mass in each cell should be in tracer, and how much is left after accounting for
-        #the halo contributions. The remaining amount is assigned a background value.
-        new_map += self.background_val * np.clip(self.global_tracer_fraction - Trtot_map / Mtot_map, 0, None) * orig_map_flattened
+        assert np.invert(np.isnan(np.sum(new_map))), "new_map past add is NaN"
+        assert np.invert(np.isnan(np.sum(drho_m))), "drho_m is NaN"
         new_map  = new_map.reshape(orig_map.shape)
+        assert np.invert(np.isnan(np.sum(new_map))), "new_map past reshape is NaN"
 
-        return new_map
-    
-    
-    
+        return new_map    

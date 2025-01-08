@@ -46,7 +46,7 @@ class BaseThermodynamicProfile(SchneiderProfiles):
 
     def __init__(self, mass_def = ccl.halos.massdef.MassDef(200, 'critical', c_m_relation = 'Diemer15'), 
                  use_fftlog_projection = False, 
-                 padding_lo_proj = 0.1, padding_hi_proj = 10, n_per_decade_proj = 10,
+                 padding_lo_proj = 0.1, padding_hi_proj = 10, n_per_decade_proj = 10, xi_mm = None,
                  **kwargs):
         
         #Go through all input params, and assign Nones to ones that don't exist.
@@ -63,7 +63,10 @@ class BaseThermodynamicProfile(SchneiderProfiles):
         self.n_per_decade_proj = n_per_decade_proj 
         
         #Import all other parameters from the base CCL Profile class
-        super().__init__(mass_def = mass_def)
+        ccl.halos.profiles.HaloProfile.__init__(self, mass_def = mass_def)
+
+        #Function that returns correlation func at different radii
+        self.xi_mm = xi_mm
 
         #Sets the cutoff scale of all profiles, in comoving Mpc. Prevents divergence in FFTLog
         #Also set cutoff of projection integral. Should be the box side length
@@ -508,7 +511,7 @@ class GasNumberDensity(BaseThermodynamicProfile):
         
         super().__init__(**kwargs)
         
-        self.mean_molecular_weight = mean_molecular_weight
+        self.mean_molecular_weight = kwargs['mean_molecular_weight']
         
         
     
@@ -597,8 +600,6 @@ class Temperature(BaseThermodynamicProfile):
             prof = P/(n * kb_cgs)
             prof = np.where(n == 0, 0, prof)
         
-        assert np.all(prof >= 0), "Something went wrong. Temperature is negative in some places"
-
         return prof
     
     

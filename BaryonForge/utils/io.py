@@ -394,7 +394,7 @@ class GriddedMap(object):
     
     bins : ndarray
         A numpy array representing the coordinates of the map along a given axis, in physical Mpc. It determines
-        the spacing and extent of the grid.
+        the spacing and extent of the grid. This is the center of each pixel.
     
     cosmo : dict
         A dictionary containing the cosmological parameters. Must include keys for 'Omega_m', 'sigma8', 'h',
@@ -415,7 +415,7 @@ class GriddedMap(object):
         The resolution of the grid, calculated as the difference between consecutive bin values.
     
     bins : ndarray
-        The bin coordinates of the map, in physical Mpc.
+        The bin coordinates of the map, in physical Mpc. This is the center of each pixel.
     
     is2D : bool
         A boolean indicating whether the map is 2D (`True`) or 3D (`False`).
@@ -450,6 +450,7 @@ class GriddedMap(object):
         self.Npix     = self.map.shape[0]
         self.res      = bins[1] - bins[0]
         self.bins     = bins
+        self.L        = bins[-1] + self.res/2 #Box size is center of last bin + 1/2 the bin width
         
         self.is2D = True if len(self.map.shape) == 2 else False
 
