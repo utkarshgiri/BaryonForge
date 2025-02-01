@@ -3,8 +3,9 @@ import pyccl as ccl
 from operator import add, mul, sub, truediv, pow, neg, pos, abs
 import warnings
 
-from scipy import interpolate, special
-from ..utils.Tabulate import _set_parameter
+from scipy import interpolate, special, integrate
+from ..utils import _set_parameter, safe_Pchip_minimize
+from .misc import Zeros
 from . import Schneider19 as S19
 from .Thermodynamic import (G, Msun_to_Kg, Mpc_to_m, kb_cgs, m_p, m_to_cm)
 
@@ -33,10 +34,10 @@ class AricoProfiles(S19.SchneiderProfiles):
     #Define the new param names
     model_param_names = model_params
 
-
-    def __init__(self, **kwargs):
+    #Use a smaller r_max, since most profiles are truncated at R200c now.
+    def __init__(self, r_max_int = 10, **kwargs):
         
-        super().__init__(**kwargs)
+        super().__init__(**kwargs, r_max_int = r_max_int)
         
         #Go through all input params, and assign Nones to ones that don't exist.
         #If mass/redshift/conc-dependence, then set to 1 if don't exist
@@ -84,6 +85,7 @@ class AricoProfiles(S19.SchneiderProfiles):
         """
         
         beta = 3 - np.power(self.M_inn/M, self.mu) * np.ones_like(M)
+        beta = np.clip(beta, -1, None)
         
         #Use M_c as the mass-normalization for simplicity sake
         theta_out = self.theta_out * np.ones_like(M) 
@@ -170,7 +172,7 @@ class AricoProfiles(S19.SchneiderProfiles):
             gamma *= self.alpha_sat
 
         x   = np.log10(M/M1)
-        g_x = -np.log10(np.power(10, alpha * x) + 1) + delta * np.power(np.log10(1 + np.exp(x)), gamma)/(1 + np.exp(10**-x))
+        g_x = -np.log10(np.power(10, alpha * x) + 1) + delta * np.power(np.log10(1 + np.exp(x)), gamma)/(1 + np.exp(np.clip(10**-x, None, 30)))
         g_0 = -np.log10(np.power(10, alpha * 0) + 1) + delta * np.power(np.log10(1 + np.exp(0)), gamma)/(1 + np.exp(10**-0))
         fCG = eps * (M1/M) * np.power(10, g_x - g_0)
 
@@ -183,7 +185,7 @@ class AricoProfiles(S19.SchneiderProfiles):
         '''
         
         string = f"("
-        for m in model_params:
+        for m in self.model_param_names:
             string += f"{m} = {self.__dict__[m]}, "
         string = string[:-2] + ')'
         return string
@@ -226,11 +228,11 @@ class DarkMatter(AricoProfiles):
         z = 1/a - 1
 
         if self.cdelta is None:
-            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mdef = self.mass_def) #Use the diemer calibration
+            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mass_def = self.mass_def) #Use the diemer calibration
         else:
-            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mdef = self.mass_def)
+            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mass_def = self.mass_def)
             
-        c   = c_M_relation.get_concentration(cosmo, M_use, a)
+        c   = c_M_relation(cosmo, M_use, a)
         R   = self.mass_def.get_radius(cosmo, M_use, a)/a #in comoving Mpc
         r_s = R/c
 
@@ -290,14 +292,17 @@ class Stars(AricoProfiles):
     - \( N \) is the numerically computed normalization factor, computed to ensure mass conservation.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, r_min_int = 1e-6, r_max_int = 5, **kwargs):
         
-        super().__init__(**kwargs)
+        super().__init__(r_min_int = r_min_int, r_max_int = r_max_int, **kwargs)
         
         #For some reason, we need to make this extreme in order
         #to prevent ringing in the profiles. Haven't figured out
-        #why this is the case
+        #why this is the case. We also change the plaw to be close to -3.
+        #If exactly -3 we get CCL spline error, and being close to -3 results in
+        #convergent predictions for alpha_g >> 2
         self.update_precision_fftlog(padding_lo_fftlog = 1e-5, padding_hi_fftlog = 1e5)
+        self.update_precision_fftlog(plaw_fourier = -3 + 1e-4)
 
     
     def _real(self, cosmo, r, M, a):
@@ -313,7 +318,7 @@ class Stars(AricoProfiles):
 
         #Integrate over wider region in radii to get normalization of star profile
         #There's no way the profile has any support than 5Mpc. So use a narrower range.
-        r_integral    = np.geomspace(1e-6, 5, 500)
+        r_integral    = np.geomspace(self.r_min_int, self.r_max_int, self.r_steps)
         prof_integral = 1 / R_h / np.power(r_integral, self.alpha_g) * np.exp(-np.power(r_integral/2/R_h, 2))
         Normalization = np.trapz(4 * np.pi * r_integral**2 * prof_integral, r_integral, axis = -1)[:, None]
         
@@ -381,9 +386,11 @@ class BoundGas(AricoProfiles):
         f_sg  = self._get_star_frac(M_use, z, satellite = True)
         f_bar = cosmo.cosmo.params.Omega_b/cosmo.cosmo.params.Omega_m
         beta  = self._get_gas_params(M_use, z)[0]
-        f_hg  = (f_bar - f_cg - f_sg) / (1 + np.power(self.M_c/M_use, self.beta))
-        f_rg  = (f_bar - f_cg - f_sg - f_hg) / (1 + np.power(self.M_r/M_use, self.beta_r))
-        f_bg  = (f_hg - f_rg)
+        f_gas = f_bar - f_cg - f_sg
+        f_hg  = f_gas / (1 + np.power(self.M_c/M_use, self.beta))
+        f_rg  = (f_gas - f_hg) / (1 + np.power(self.M_r/M_use, self.beta_r))
+        f_rg  = np.clip(f_rg, None, f_hg) #Reaccreted gas cannot be more than halo gas 
+        f_bg  = f_hg - f_rg
 
         #Get gas params
         beta, theta_out, theta_inn = self._get_gas_params(M_use, z)
@@ -399,7 +406,7 @@ class BoundGas(AricoProfiles):
         #super fine resolution in the grid.
         Normalization = np.ones_like(M_use)
         for m_i in range(M_use.shape[0]):
-            r_integral = np.geomspace(1e-6, R[m_i], 500)
+            r_integral = np.geomspace(self.r_min_int, R[m_i], self.r_steps)
             u_integral = r_integral/R_co[m_i]
             v_integral = r_integral/R_ej[m_i]        
 
@@ -415,7 +422,6 @@ class BoundGas(AricoProfiles):
         kfac  = 1/( 1 + np.exp(2*arg) ) #Extra exponential cutoff
         prof  = 1/(1 + u)**beta / (1 + v**2)**2 * kfac
         prof *= f_bg*M_use[:, None]/Normalization #This profile is allowed to go beyond R200c!
-
 
         #Handle dimensions so input dimensions are mirrored in the output
         if np.ndim(r) == 0: prof = np.squeeze(prof, axis=-1)
@@ -469,8 +475,9 @@ class EjectedGas(AricoProfiles):
         f_sg  = self._get_star_frac(M_use, z, satellite = True)
         f_bar = cosmo.cosmo.params.Omega_b/cosmo.cosmo.params.Omega_m
         beta  = self._get_gas_params(M_use, z)[0]
-        f_hg  = (f_bar - f_cg - f_sg) / (1 + np.power(self.M_c/M_use, self.beta))
-        f_eg  =  f_bar - f_cg - f_sg - f_hg
+        f_gas = f_bar - f_cg - f_sg
+        f_hg  = f_gas / (1 + np.power(self.M_c/M_use, self.beta))
+        f_eg  = f_gas - f_hg #By definition f_hg <= f_gas
         f_eg  = f_eg[:, None]
 
         #Now use the escape radius, which is r_esc = v_esc * t_hubble
@@ -538,8 +545,10 @@ class ReaccretedGas(AricoProfiles):
         f_sg  = self._get_star_frac(M_use, z, satellite = True)
         f_bar = cosmo.cosmo.params.Omega_b/cosmo.cosmo.params.Omega_m
         beta  = self._get_gas_params(M_use, z)[0]
-        f_hg  = (f_bar - f_cg - f_sg) / (1 + np.power(self.M_c/M_use, self.beta))
-        f_rg  = (f_bar - f_cg - f_sg - f_hg) / (1 + np.power(self.M_r/M_use, self.beta_r))
+        f_gas = f_bar - f_cg - f_sg
+        f_hg  = f_gas / (1 + np.power(self.M_c/M_use, self.beta))
+        f_rg  = (f_gas - f_hg) / (1 + np.power(self.M_r/M_use, self.beta_r))
+        f_rg  = np.clip(f_rg, None, f_hg) #Reaccreted gas cannot be more than halo gas 
         
         #Get gas params
         R_rg = self.theta_rg*R[:, None]
@@ -647,17 +656,6 @@ class ModifiedDarkMatter(AricoProfiles):
 
         super().__init__(**kwargs)
     
-
-    def _safe_Pchip_minimize(self, x, y):
-
-        assert (np.min(x) < 0) & (np.max(x) > 0), f"Cannot minimize. Range {np.min(x)} < LHS - RHS < {np.max(x)} does not include zero!"
-
-        ind = np.argmin(np.abs(x - 0)) #Find the point around which we should search for minima
-        buf = 5 #Large enough (one-sided) buffer in case any weird interpolator effects from using too few points
-        ind = slice(ind - buf, ind + buf)
-
-        return interpolate.PchipInterpolator(x[ind], y[ind])(0)
-     
     def _real(self, cosmo, r, M, a):
 
         r_use = np.atleast_1d(r)
@@ -666,23 +664,23 @@ class ModifiedDarkMatter(AricoProfiles):
         z = 1/a - 1
 
         if self.cdelta is None:
-            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mdef = self.mass_def) #Use the diemer calibration
+            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mass_def = self.mass_def) #Use the diemer calibration
         else:
-            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mdef = self.mass_def)
+            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mass_def = self.mass_def)
             
-        c   = c_M_relation.get_concentration(cosmo, M_use, a)
+        c   = c_M_relation(cosmo, M_use, a)
         R   = self.mass_def.get_radius(cosmo, M_use, a)/a #in comoving Mpc
         r_s = R/c        
         r_s = r_s[:, None]
         fDM = 1 - cosmo.cosmo.params.Omega_b/cosmo.cosmo.params.Omega_m
 
         #Solving equation A10 of https://arxiv.org/pdf/1911.08471 through minimization
-        rp    = np.geomspace(1e-6, 10, 500)
+        rp    = np.geomspace(self.r_min_int, self.r_max_int, self.r_steps)
         pGro  = np.array([self.GravityOnly.real(cosmo, r, m, a) for r, m in zip(R, M_use)])[:, None]
         pBG   = np.array([self.Gas.real(cosmo, r, m, a) for r, m in zip(R, M_use)])[:, None]
         LHS   = rp * np.power(rp + r_s, 2) * (pGro - pBG) * (np.log(1 + rp/r_s) - 1/(1 + r_s/rp)) + (pGro - pBG)/3 * (R**3 - rp**3)
         RHS   = fDM * M_use[None, :] / (4*np.pi)
-        rp    = np.exp([self._safe_Pchip_minimize((LHS - RHS)[m_i], np.log(rp)) for m_i in range(LHS.shape[0])])[:, None]
+        rp    = np.exp([safe_Pchip_minimize((LHS - RHS)[m_i], np.log(rp)) for m_i in range(LHS.shape[0])])[:, None]
         
         #Get the normalization based on equation A8 of https://arxiv.org/pdf/1911.08471
         rho_c = (pGro - pBG) * (rp/r_s) * np.power(1 + rp/r_s, 2)
@@ -725,12 +723,8 @@ class CollisionlessMatter(AricoProfiles):
             
         self.max_iter   = max_iter
         self.reltol     = reltol
-
-        self.r_min_int  = r_min_int
-        self.r_max_int  = r_max_int
-        self.r_steps    = r_steps
         
-        super().__init__(**kwargs)
+        super().__init__(**kwargs, r_min_int = 1e-8, r_max_int = 1e5, r_steps = 5000)
 
     def _real(self, cosmo, r, M, a):
 
@@ -768,9 +762,10 @@ class CollisionlessMatter(AricoProfiles):
             rho_gas    = self.Gas.real(cosmo, r_integral, M_use[m_i], a)
 
             dlnr  = np.log(r_integral[1]) - np.log(r_integral[0])
-            M_i   = 4 * np.pi * np.cumsum(r_integral**3 * rho_i   * dlnr)
-            M_cga = 4 * np.pi * np.cumsum(r_integral**3 * rho_cga * dlnr)
-            M_gas = 4 * np.pi * np.cumsum(r_integral**3 * rho_gas * dlnr)
+            dV    = r_integral**3 * dlnr
+            M_i   = 4 * np.pi * integrate.cumulative_simpson(dV * rho_i  , axis = -1, initial = dV[0] * rho_i[0])
+            M_cga = 4 * np.pi * integrate.cumulative_simpson(dV * rho_cga, axis = -1, initial = dV[0] * rho_cga[0])
+            M_gas = 4 * np.pi * integrate.cumulative_simpson(dV * rho_gas, axis = -1, initial = dV[0] * rho_gas[0])
 
             #Assume extrapolation is used only for r > r_max. In this case, the extrapolation
             #coefficients are just the integrated mass at r_max. Our r_min is sufficientyly
@@ -827,7 +822,7 @@ class CollisionlessMatter(AricoProfiles):
                 if (counter >= self.max_iter) & (max_rel_diff > self.reltol): 
                     
                     med_rel_diff = np.max(abs_diff[safe_range])
-                    warn_text = ("Profile of halo index %d did not converge after %d tries." % (m_i, counter) +
+                    warn_text = ("Profile of halo index %d did not converge after %d tries. " % (m_i, counter) +
                                  "Max_diff = %0.5f, Median_diff = %0.5f. Try increasing max_iter." % (max_rel_diff, med_rel_diff)
                                 )
                     
@@ -865,38 +860,30 @@ class CollisionlessMatter(AricoProfiles):
         return prof
 
 
-class DarkMatterOnly(S19.DarkMatterOnly, AricoProfiles):
+class DarkMatterOnly(DarkMatter):
+    """
+    For Arico20, the DarkMatterOnly model includes just an NFW profile.
+    There is no two-halo term. This class is simply a copy of the `DarkMatter` class.
+    See that class for more details
+    """
 
-    __doc__ = S19.DarkMatterOnly.__doc__.replace('SchneiderProfiles', 'AricoProfiles')
-
-    def __init__(self, darkmatter = None, **kwargs):
-        
-        self.DarkMatter = darkmatter
-        self.TwoHalo    = TwoHalo(**kwargs) * 0 #Should not add 2-halo in Arico method
-
-        if self.DarkMatter is None: self.DarkMatter = DarkMatter(**kwargs)
-            
-        AricoProfiles.__init__(self, **kwargs)
-
-
-class DarkMatterBaryon(S19.DarkMatterBaryon, AricoProfiles):
+class DarkMatterBaryon(Gas):
 
     __doc__ = S19.DarkMatterBaryon.__doc__.replace('SchneiderProfiles', 'AricoProfiles')
 
-    def __init__(self, gas = None, stars = None, collisionlessmatter = None, darkmatter = None, **kwargs):
+    def __init__(self, gas = None, stars = None, collisionlessmatter = None, **kwargs):
+        
         
         self.Gas   = gas
         self.Stars = stars
-        self.TwoHalo    = TwoHalo(**kwargs) * 0 #Should not add 2-halo in Arico method
-        self.DarkMatter = darkmatter
         self.CollisionlessMatter = collisionlessmatter
         
         if self.Gas is None:        self.Gas        = Gas(**kwargs)        
         if self.Stars is None:      self.Stars      = Stars(**kwargs)
-        if self.DarkMatter is None: self.DarkMatter = DarkMatter(**kwargs)
         if self.CollisionlessMatter is None: self.CollisionlessMatter = CollisionlessMatter(**kwargs)
 
-        AricoProfiles.__init__(self, **kwargs)
+        self.myprof = self.Gas + self.Stars + self.CollisionlessMatter
+        
 
 class DarkMatterOnlywithLSS(S19.DarkMatterOnly, AricoProfiles):
 
@@ -913,7 +900,7 @@ class DarkMatterOnlywithLSS(S19.DarkMatterOnly, AricoProfiles):
         AricoProfiles.__init__(self, **kwargs)
 
 
-class DarkMatterBaryonwithLSS(S19.DarkMatterBaryon, AricoProfiles):
+class DarkMatterBaryonwithLSS(DarkMatterBaryon):
 
     __doc__ = S19.DarkMatterBaryon.__doc__.replace('SchneiderProfiles', 'AricoProfiles')
 
@@ -922,16 +909,14 @@ class DarkMatterBaryonwithLSS(S19.DarkMatterBaryon, AricoProfiles):
         self.Gas   = gas
         self.Stars = stars
         self.TwoHalo    = twohalo
-        self.DarkMatter = darkmatter
         self.CollisionlessMatter = collisionlessmatter
         
         if self.Gas is None:        self.Gas        = Gas(**kwargs)        
         if self.Stars is None:      self.Stars      = Stars(**kwargs)
         if self.TwoHalo is None:    self.TwoHalo    = TwoHalo(**kwargs)
-        if self.DarkMatter is None: self.DarkMatter = DarkMatter(**kwargs)
         if self.CollisionlessMatter is None: self.CollisionlessMatter = CollisionlessMatter(**kwargs)
 
-        AricoProfiles.__init__(self, **kwargs)
+        self.myprof = self.Gas + self.Stars + self.CollisionlessMatter + self.TwoHalo
     
 
 class Pressure(AricoProfiles):
@@ -995,12 +980,12 @@ class Pressure(AricoProfiles):
         R = self.mass_def.get_radius(cosmo, M_use, a)/a #in comoving Mpc
 
         if self.cdelta is None:
-            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mdef = self.mass_def) #Use the diemer calibration
+            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mass_def = self.mass_def) #Use the diemer calibration
         else:
-            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mdef = self.mass_def)
+            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mass_def = self.mass_def)
 
         #Get concentration values, and the effective equation of state, Gamma    
-        c    = c_M_relation.get_concentration(cosmo, M_use, a)[:, None]
+        c    = c_M_relation(cosmo, M_use, a)[:, None]
         r_s  = R[:, None]/c
         Norm = 4*np.pi*r_s**3 * (np.log(1 + c) - c/(1 + c))
         rhoc = M_use[:, None]/Norm
@@ -1015,6 +1000,7 @@ class Pressure(AricoProfiles):
         #Now compute the final profile
         rhoBG = self.Gas.real(cosmo, r_use, M_use, a)
         prof  = P0 * np.power(rhoBG, Geff)
+        prof  = np.where(np.isfinite(prof), prof, 0) #Really happens when f_BG = 0 because of weird param space
         
         arg   = (r_use[None, :] - self.cutoff)
         arg   = np.where(arg > 30, np.inf, arg) #This is to prevent an overflow in the exponential
@@ -1071,17 +1057,22 @@ class NonThermalFrac(AricoProfiles):
         
         #They define the model with R200m, so gotta use that redefinition here.
         mdef  = ccl.halos.massdef.MassDef(200, 'matter')
-        cnvrt = ccl.halos.mass_translator(mass_in = self.mass_def, mass_out = mdef, concentration = self.mass_def.concentration)
+        cnvrt = ccl.halos.mass_translator(mass_in = self.mass_def, mass_out = mdef, concentration = 'Diemer15')
         M200m = cnvrt(cosmo, M_use, a)
         R200m = mdef.get_radius(cosmo, M_use, a)/a #in comoving distance
 
         x = r_use/R200m[:, None]
 
-        a, b, c, d, e, f = 0.495, 0.719, 1.417,-0.166, 0.265, -2.116 #Values from Green20
-        a    = self.A_nt * np.power(1 + z, self.alpha_nt) #We override the "a" param alone for more flexibility.
         nu_M = 1.686/ccl.sigmaM(cosmo, M200m, a)
         nu_M = nu_M[:, None]
-        nth  = 1 - a * (1 + np.exp(-(x/b)**c)) * (nu_M/4.1)**(d/(1 + (x/e)**f))
+
+        #Using "A" so no conflict with scale factor above, "a".
+        #We assign A the fiducial value from Green for reference, but
+        #this gets rewriten later with the custom model from Arico for the amplitude
+        A, b, c, d, e, f = 0.495, 0.719, 1.417,-0.166, 0.265, -2.116 #Values from Green20
+        A    = self.A_nt * np.power(1 + z, self.alpha_nt) #We override the "a" param alone for more flexibility.
+        nth  = 1 - A * (1 + np.exp(-(x/b)**c)) * (nu_M/4.1)**(d/(1 + (x/e)**f))
+        nth  = np.clip(nth, 0, 1)
         prof = nth #Rename just for consistency sake
         
         #Handle dimensions so input dimensions are mirrored in the output
@@ -1092,6 +1083,17 @@ class NonThermalFrac(AricoProfiles):
 
         return prof
     
+class ThermalPressure(Gas):
+    """
+    Convenience class for combining Pressure and NonthermalFraction.
+
+    This class simplifies calculations by leveraging the logic and methods of these individual 
+    pressure and Nth components and combining their profiles into a single representation.
+    """
+
+    def __init__(self, **kwargs): self.myprof = Pressure(**kwargs) * (1 - NonThermalFrac(**kwargs))
+
+
 class Temperature(AricoProfiles):
     """
     Class for modeling the temperature profile of gas in halos.
@@ -1243,18 +1245,18 @@ class ExtendedBoundGas(AricoProfiles):
 
         #Now compute the large-scale behavior (which is an NFW profile)
         if self.cdelta is None:
-            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mdef = self.mass_def) #Use the diemer calibration
+            c_M_relation = ccl.halos.concentration.ConcentrationDiemer15(mass_def = self.mass_def) #Use the diemer calibration
         else:
-            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mdef = self.mass_def)
+            c_M_relation = ccl.halos.concentration.ConcentrationConstant(self.cdelta, mass_def = self.mass_def)
             
-        c     = c_M_relation.get_concentration(cosmo, M_use, a)
+        c     = c_M_relation(cosmo, M_use, a)
         r_s   = (R/c)[:, None]
         x     = r_use / r_s
         y1    = np.power(1 + R_out/R_inn, -beta)/4 * (R_out/r_s) * np.power(1 + R_out/r_s, 2)
         
         #Integrate over wider region in radii to get normalization of gas profile
         #Using a number narrower range than Schneider cause we only need to go to R200c
-        r_integral = np.geomspace(1e-6, 10, 500)
+        r_integral = np.geomspace(self.r_min_int, self.r_max_int, self.r_steps)
         u_integral = r_integral/R_inn
         v_integral = r_integral/R_out
 
@@ -1350,7 +1352,7 @@ class BoundGasDeprecated(AricoProfiles):
         
         #Integrate over wider region in radii to get normalization of gas profile
         #Only go till 10Mpc since profile is cut at R200c
-        r_integral = np.geomspace(1e-6, 10, 500)
+        r_integral = np.geomspace(self.r_min_int, self.r_max_int, self.r_steps)
         x_integral = r_integral / r_s
 
         u_integral = np.power(np.log(1 + x_integral)/x_integral, Geff)

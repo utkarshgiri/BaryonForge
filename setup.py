@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='BaryonForge',
-    version='1.0.0',
+    version='1.1.0',
     author='Dhayaa Anbajagane',
     author_email='dhayaa@uchicago.edu',
     description='A pipeline for adding baryonic imprints and thermodynamic maps to N-body simulations',
@@ -15,14 +15,14 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.9',
     install_requires=[
         'tqdm',
         'healpy',
-        'scipy',
+        'scipy>=1.12',
         'numpy==1.*',
         'numba',
-        'pyccl==2.8.0'
+        'pyccl>=3.1.2'
     ],
     entry_points={
         'console_scripts': [
