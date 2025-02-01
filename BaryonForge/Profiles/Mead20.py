@@ -10,8 +10,10 @@ from . import Schneider19 as S19, Arico20 as A20
 from .Thermodynamic import (G, Msun_to_Kg, Mpc_to_m, kb_cgs, m_p, m_to_cm)
 
 __all__ = ['model_params', 'MeadProfiles', 
-           'DarkMatter', 'TwoHalo', 'Stars', 'Gas', 'BoundGas', 'EjectedGas', 'ReaccretedGas', 'CollisionlessMatter',
-           'DarkMatterOnly', 'DarkMatterBaryon']
+           'DarkMatter', 'TwoHalo', 'CentralStars', 'SatelliteStars', 'Stars', 
+           'Gas', 'BoundGas', 'EjectedGas', 'ReaccretedGas', 'CollisionlessMatter',
+           'DarkMatterOnly', 'DarkMatterBaryon',
+           'Temperature', 'Pressure']
 
 model_params = ['cdelta', 'eps1', 'nu_eps1', 'eps2', #DM profle param and relaxation params
                 'cutoff', 'proj_cutoff', #Cutoff parameters (numerical)
