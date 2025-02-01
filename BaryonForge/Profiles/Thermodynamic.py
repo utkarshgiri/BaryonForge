@@ -47,7 +47,7 @@ class BaseThermodynamicProfile(SchneiderProfiles):
     def __init__(self, mass_def = ccl.halos.massdef.MassDef200c, 
                  use_fftlog_projection = False, 
                  padding_lo_proj = 0.1, padding_hi_proj = 10, n_per_decade_proj = 10,
-                 r_min_int = 1e-6, r_max_int = 1e3, r_steps = 500,
+                 r_min_int = 1e-6, r_max_int = 1e3, r_steps = 500, xi_mm = None,
                  **kwargs):
         
         #Go through all input params, and assign Nones to ones that don't exist.
@@ -69,7 +69,10 @@ class BaseThermodynamicProfile(SchneiderProfiles):
         self.r_steps   = r_steps
         
         #Import all other parameters from the base CCL Profile class
-        super().__init__(mass_def = mass_def)
+        ccl.halos.profiles.HaloProfile.__init__(self, mass_def = mass_def)
+
+        #Function that returns correlation func at different radii
+        self.xi_mm = xi_mm
 
         #Sets the cutoff scale of all profiles, in comoving Mpc. Prevents divergence in FFTLog
         #Also set cutoff of projection integral. Should be the box side length
@@ -518,14 +521,14 @@ class GasNumberDensity(BaseThermodynamicProfile):
         - The result is converted to the proper units (number per cubic centimeter).
     """
     
-    def __init__(self, gas = None, mean_molecular_weight = 1.15, **kwargs):
+    def __init__(self, gas = None, **kwargs):
         
         self.Gas = gas
         if self.Gas is None: self.Gas = Gas(**kwargs)
         
         super().__init__(**kwargs)
         
-        self.mean_molecular_weight = mean_molecular_weight
+        self.mean_molecular_weight = kwargs['mean_molecular_weight']
         
         
     
@@ -614,8 +617,6 @@ class Temperature(BaseThermodynamicProfile):
             prof = P/(n * kb_cgs)
             prof = np.where(n == 0, 0, prof)
         
-        assert np.all(prof >= 0), "Something went wrong. Temperature is negative in some places"
-
         return prof
     
     
@@ -673,6 +674,8 @@ class Temperature(BaseThermodynamicProfile):
             prof = np.where(n == 0, 0, prof)
 
         return prof
+    
+    
     
     
 
