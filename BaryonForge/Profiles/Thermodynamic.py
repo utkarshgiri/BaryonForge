@@ -195,7 +195,8 @@ class Pressure(BaseThermodynamicProfile):
 
         This method calculates the gas pressure profile for a specified cosmology, radii, 
         halo mass, and scale factor. The pressure is computed by integrating the pressure 
-        gradient derived from the hydrostatic equilibrium condition.
+        gradient derived from the hydrostatic equilibrium condition. The final profile is 
+        in units of comoving volume. Use a factor of 1/a^3 (not 1/a^4) to convert to physical pressure.
 
         Parameters
         ----------
@@ -288,7 +289,10 @@ class Pressure(BaseThermodynamicProfile):
         prof  = np.where(np.isfinite(prof), prof, 0) #Get rid of pesky NaN and inf values if they exist! They break CCL spline interpolator
         
         #Convert to CGS. Using only one factor of Mpc_to_m is correct here!
+        #The factor of 1/a is so the  temperature piece of Pressure = Temp x density
+        #is always in physical units. So the comoving units are just in the density.
         prof  = prof * (Msun_to_Kg * 1e3) / (Mpc_to_m * 1e2)
+        prof  = prof / a
         
         #Now do cutoff
         arg   = (r_use[None, :] - self.cutoff)
@@ -763,7 +767,7 @@ class ThermalSZ(BaseThermodynamicProfile):
 
         #Now a series of units changes to the projected profile.
         prof  = self.pressure.projected(cosmo, r_use, M_use, a) #generate profile
-        prof  = prof * a * (Mpc_to_m * 1e2) #Line-of-sight integral is done in comoving Mpc, we want physical cm
+        prof  = prof * (Mpc_to_m * 1e2) #Line-of-sight integral is done in Mpc, we want cm
         prof  = prof * sigma_T_cgs/(m_e_cgs*c_cgs**2) #Convert to SZ (dimensionless units)
         prof  = prof * self.Pgas_to_Pe(cosmo, r_use, M_use, a) #Then convert from gas pressure to electron pressure
         
