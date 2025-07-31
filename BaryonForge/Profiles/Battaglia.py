@@ -207,7 +207,7 @@ class ElectronPressure(Pressure):
         return prof
     
     
-class GasDensity(ccl.halos.profiles.HaloProfile):
+class GasDensity(ccl.halos.profiles.HaloProfileMatter):
     """
     Computes the gas density profile based on the Battaglia et al. (2012) model.
 
@@ -276,6 +276,9 @@ class GasDensity(ccl.halos.profiles.HaloProfile):
             rho_0  = 1.9e4 * (M_use/1e14)**0.09   * (1 + z)**-0.95
             alpha  = 0.70 * (M_use/1e14)**-0.017  * (1 + z)**0.27
             beta   = 4.43 * (M_use/1e14)**0.005   * (1 + z)**0.037
+        
+        else:
+            raise ValueError(f"Invalid value for param: {self.Model_def}. Expected '200_AGN' or '200_SH'.")
 
 
         R = mass_def.get_radius(cosmo, M_use, a)/a #in comoving Mpc
@@ -308,3 +311,19 @@ class GasDensity(ccl.halos.profiles.HaloProfile):
             prof = np.squeeze(prof, axis=0)
         
         return prof
+
+    def get_normalization(self, cosmo, a, *, hmc=None):
+
+        """Returns the normalization of all matter overdensity
+        profiles, which we take to be comoving `baryon` density.
+
+        Args:
+            cosmo (:class:`~pyccl.cosmology.Cosmology`): a Cosmology object.
+            a (:obj:`float`): scale factor.
+            hmc (:class:`~pyccl.halos.halo_model.HMCalculator`): a halo
+                model calculator object.
+
+        Returns:
+            :obj:`float`: normalization factor of this profile.
+        """
+        return ccl.physical_constants.RHO_CRITICAL * cosmo["Omega_b"] * cosmo["h"]**2
